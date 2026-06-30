@@ -1,4 +1,4 @@
-// 标签操作模块 - 支持分组单选/多选
+// 标签操作模块 - 支持动态单选/多选
 window.__MODULES__ = window.__MODULES__ || {};
 window.__MODULES__.tagOps = (function() {
     var CONFIG = window.__MODULES__.CONFIG;
@@ -61,24 +61,19 @@ window.__MODULES__.tagOps = (function() {
             return all;
         },
 
-        // 根据分组配置决定单选还是多选
+        // ---- 核心：根据动态类型决定单选/多选 ----
         toggleTag: function(gid, tag) {
             if (!selections[gid]) selections[gid] = new Set();
             var set = selections[gid];
-            var group = CONFIG.groups.find(function(g) { return g.id === gid; });
-            var isRadio = group && group.type === 'radio';
+            // 使用 CONFIG.getGroupType 获取当前类型
+            var isRadio = CONFIG.getGroupType(gid) === 'radio';
 
             if (isRadio) {
-                // 单选：清空该组，只选中当前标签
                 set.clear();
                 set.add(tag);
             } else {
-                // 多选：切换当前标签
-                if (set.has(tag)) {
-                    set.delete(tag);
-                } else {
-                    set.add(tag);
-                }
+                if (set.has(tag)) set.delete(tag);
+                else set.add(tag);
             }
             saveSelections();
             return set;
