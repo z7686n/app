@@ -1,4 +1,4 @@
-// UI 面板模块 - 渲染、交互、编辑模式
+// UI 面板模块 - 渲染、交互、编辑模式，支持动态切换单选/多选
 window.__MODULES__ = window.__MODULES__ || {};
 window.__MODULES__.ui = (function() {
     var CONFIG = window.__MODULES__.CONFIG;
@@ -86,6 +86,26 @@ window.__MODULES__.ui = (function() {
         }
     }
 
+    // ---- 切换分组类型 ----
+    function toggleGroupType(groupId) {
+        var currentType = CONFIG.getGroupType(groupId);
+        var newType = currentType === 'radio' ? 'checkbox' : 'radio';
+        CONFIG.setGroupType(groupId, newType);
+        // 刷新UI显示和按钮行为
+        renderUI();
+        // 如果该组有选中的标签，需要重新计算（单选->多选时保留，多选->单选时只保留一个）
+        var selections = tagOps.getGroupSelections(groupId);
+        if (newType === 'radio' && selections.size > 1) {
+            // 多选变单选：保留第一个选中的
+            var first = Array.from(selections)[0];
+            selections.clear();
+            if (first) selections.add(first);
+            tagOps.saveSelections();
+        }
+        updateButtons();
+        showToast('🔄 ' + groupId + ' 已切换为 ' + (newType === 'radio' ? '单选' : '多选'));
+    }
+
     function addTagToGroup(gid) {
         var newTag = prompt('请输入要添加的标签文本:');
         if (!newTag || !newTag.trim()) return;
@@ -143,7 +163,8 @@ window.__MODULES__.ui = (function() {
         groups.forEach(function(group) {
             var tags = getGroupTags(group.id);
             var selected = tagOps.getGroupSelections(group.id);
-            var typeLabel = group.type === 'radio' ? '（单选）' : '（多选）';
+            var currentType = CONFIG.getGroupType(group.id);
+            var typeLabel = currentType === 'radio' ? '单选' : '多选';
 
             var gDiv = document.createElement('div');
             gDiv.className = 'group-container';
@@ -151,7 +172,9 @@ window.__MODULES__.ui = (function() {
 
             var header = document.createElement('div');
             header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;cursor:pointer;';
-            header.addEventListener('click', function() {
+            header.addEventListener('click', function(e) {
+                // 防止点击切换按钮时触发折叠
+                if (e.target.closest('.type-toggle-btn')) return;
                 var content = document.getElementById('group-' + group.id + '-tags');
                 if (content) {
                     var hidden = content.style.display === 'none';
@@ -166,11 +189,23 @@ window.__MODULES__.ui = (function() {
             left.innerHTML =
                 '<span style="font-size:16px;">' + group.icon + '</span>' +
                 '<span style="font-size:13px;font-weight:bold;color:#eee;">' + group.label + '</span>' +
-                '<span style="font-size:10px;color:#888;background:rgba(255,255,255,0.06);padding:0 6px;border-radius:3px;">' + typeLabel + '</span>' +
                 '<span class="collapse-icon" style="font-size:11px;color:#666;">▼</span>';
 
             var right = document.createElement('span');
             right.style.cssText = 'display:flex;align-items:center;gap:6px;';
+
+            // ---- 切换按钮 ----
+            var toggleTypeBtn = document.createElement('button');
+            toggleTypeBtn.className = 'type-toggle-btn';
+            toggleTypeBtn.textContent = '🔘 ' + typeLabel;
+            toggleTypeBtn.style.cssText = 'font-size:10px;padding:1px 6px;border-radius:4px;border:1px solid #666;background:rgba(255,255,255,0.05);color:#aaa;cursor:pointer;transition:all 0.2s;';
+            toggleTypeBtn.title = '点击切换单选/多选';
+            toggleTypeBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                toggleGroupType(group.id);
+            });
+            right.append(toggleTypeBtn);
+
             var count = document.createElement('span');
             count.id = 'group-' + group.id + '-count';
             count.style.cssText = 'font-size:11px;color:#4fc3f7;';
@@ -305,6 +340,7 @@ window.__MODULES__.ui = (function() {
                     .action-btn.success:hover{background:rgba(129,199,132,0.15);}
                     .action-btn.warning{border-color:#ffb74d;color:#ffb74d;}
                     .action-btn.warning:hover{background:rgba(255,183,77,0.15);}
+                    .type-toggle-btn:hover{background:rgba(255,255,255,0.15)!important;color:#eee!important;border-color:#888!important;}
                     #template-selector{background:rgba(255,255,255,0.05);color:#ddd;border:1px solid #444;border-radius:6px;padding:3px 8px;font-size:12px;font-family:inherit;cursor:pointer;max-width:140px;outline:none;}
                     #template-selector:focus{border-color:#4fc3f7;}
                     .group-container{margin-bottom:8px;border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:8px 10px;background:rgba(255,255,255,0.02);transition:all 0.2s;}
