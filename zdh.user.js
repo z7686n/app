@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         标注助手
+// @name         标注助手3.2
 // @namespace    http://tampermonkey.net/
 // @version      3.2.0
 // @description  标注助手 - 智能分组 + 编辑功能
