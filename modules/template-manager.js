@@ -1,4 +1,4 @@
-// 模板管理模块 - 扫描、分组、CRUD
+// 模板管理模块 - 扫描、分组、CRUD + 导出/导入
 window.__MODULES__ = window.__MODULES__ || {};
 window.__MODULES__.templateManager = (function() {
     var CONFIG = window.__MODULES__.CONFIG;
@@ -173,6 +173,58 @@ window.__MODULES__.templateManager = (function() {
         return createTemplate('自动模板-' + new Date().toLocaleDateString());
     }
 
+    // ========== 新增：导出模板 ==========
+    function exportTemplates() {
+        loadTemplates();
+        var data = JSON.parse(JSON.stringify(templates));
+        data._exportInfo = {
+            exportedAt: new Date().toISOString(),
+            version: '3.2.0',
+            total: Object.keys(data).filter(function(k) { return k !== '_current' && k !== '_exportInfo'; }).length
+        };
+        return JSON.stringify(data, null, 2);
+    }
+
+    // ========== 新增：导入模板 ==========
+    function importTemplates(jsonStr, overwrite) {
+        overwrite = overwrite || false;
+        try {
+            var data = JSON.parse(jsonStr);
+            delete data._exportInfo;
+            var importedCount = 0;
+            var skippedCount = 0;
+            var keys = Object.keys(data).filter(function(k) { return k !== '_current'; });
+            for (var i = 0; i < keys.length; i++) {
+                var id = keys[i];
+                if (templates[id] && !overwrite) {
+                    skippedCount++;
+                    continue;
+                }
+                templates[id] = data[id];
+                importedCount++;
+            }
+            if (data._current && templates[data._current]) {
+                currentTemplateId = data._current;
+            } else if (importedCount > 0) {
+                var firstId = keys[0];
+                if (firstId && templates[firstId]) {
+                    currentTemplateId = firstId;
+                }
+            }
+            saveTemplates();
+            return { imported: importedCount, skipped: skippedCount };
+        } catch (e) {
+            console.error('导入模板失败:', e);
+            return null;
+        }
+    }
+
+    // ========== 新增：获取所有模板 ==========
+    function getAllTemplates() {
+        loadTemplates();
+        return templates;
+    }
+
     loadTemplates();
 
     return {
@@ -184,6 +236,10 @@ window.__MODULES__.templateManager = (function() {
         editTemplate: editTemplate,
         autoDetectAndApply: autoDetectAndApply,
         scanAndGroup: scanAndGroup,
-        getCurrentId: function() { return currentTemplateId; }
+        getCurrentId: function() { return currentTemplateId; },
+        // 新增导出导入
+        exportTemplates: exportTemplates,
+        importTemplates: importTemplates,
+        getAllTemplates: getAllTemplates
     };
 })();
