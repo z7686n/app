@@ -1,4 +1,4 @@
-// 标签操作模块 - 支持动态单选/多选
+// ==================== 标签操作模块 ====================
 window.__MODULES__ = window.__MODULES__ || {};
 window.__MODULES__.tagOps = (function() {
     var CONFIG = window.__MODULES__.CONFIG;
@@ -7,6 +7,7 @@ window.__MODULES__.tagOps = (function() {
     var sleep = utils.sleep;
     var templateManager = window.__MODULES__.templateManager;
 
+    // 各分组的选中状态
     var selections = {
         correctness: new Set(),
         evidence: new Set(),
@@ -15,12 +16,15 @@ window.__MODULES__.tagOps = (function() {
     var isProcessing = false;
     var timeoutId = null;
 
+    // ---------- 持久化 ----------
     function saveSelections() {
         try {
             var data = {};
-            for (var key in selections) data[key] = Array.from(selections[key]);
+            for (var key in selections) {
+                data[key] = Array.from(selections[key]);
+            }
             localStorage.setItem(CONFIG.selectionStorageKey, JSON.stringify(data));
-        } catch (e) {}
+        } catch (_) {}
     }
 
     function loadSelections() {
@@ -32,11 +36,12 @@ window.__MODULES__.tagOps = (function() {
                 }
                 return true;
             }
-        } catch (e) {}
+        } catch (_) {}
         return false;
     }
     loadSelections();
 
+    // ---------- 辅助 ----------
     function getGroupTags(groupId) {
         var tpl = templateManager.getCurrentTemplate();
         if (tpl && tpl.groups) {
@@ -46,6 +51,7 @@ window.__MODULES__.tagOps = (function() {
         return [];
     }
 
+    // ---------- 公开 API ----------
     return {
         getGroupTags: getGroupTags,
 
@@ -61,11 +67,10 @@ window.__MODULES__.tagOps = (function() {
             return all;
         },
 
-        // ---- 核心：根据动态类型决定单选/多选 ----
+        // 核心：根据动态类型切换标签
         toggleTag: function(gid, tag) {
             if (!selections[gid]) selections[gid] = new Set();
             var set = selections[gid];
-            // 使用 CONFIG.getGroupType 获取当前类型
             var isRadio = CONFIG.getGroupType(gid) === 'radio';
 
             if (isRadio) {
@@ -95,9 +100,11 @@ window.__MODULES__.tagOps = (function() {
             return selections[gid] ? selections[gid].has(tag) : false;
         },
 
+        // 执行标注
         selectTags: async function(targets) {
             if (isProcessing) { showToast('⏳ 正在执行中...'); return; }
             if (!targets || !targets.length) { showToast('⚠️ 请选择标签', true); return; }
+
             isProcessing = true;
             var startTime = performance.now();
             timeoutId = setTimeout(function() {
@@ -106,31 +113,34 @@ window.__MODULES__.tagOps = (function() {
                     showToast('⏰ 操作超时', true);
                 }
             }, CONFIG.operationTimeout);
+
             try {
                 var els = document.querySelectorAll('.ant-tag-checkable, .ant-tag');
-                var selected = 0,
-                    already = 0,
-                    errors = 0;
+                var selected = 0, already = 0, errors = 0;
                 var targetSet = new Set(targets);
+
                 for (var i = 0; i < els.length; i++) {
                     var el = els[i];
                     var text = el.textContent.trim();
                     if (!targetSet.has(text)) continue;
+
                     var checked = el.classList.contains('ant-tag-checkable-checked') ||
-                        el.classList.contains('ant-tag-checked') ||
-                        el.getAttribute('aria-checked') === 'true';
+                                  el.classList.contains('ant-tag-checked') ||
+                                  el.getAttribute('aria-checked') === 'true';
                     if (checked) { already++; continue; }
+
                     try {
                         if (document.contains(el)) {
                             el.click();
                             selected++;
                             await sleep(CONFIG.clickDelay);
                         }
-                    } catch (e) { errors++; }
+                    } catch (_) { errors++; }
                 }
+
                 var elapsed = (performance.now() - startTime).toFixed(0);
                 showToast('🎉 新选 ' + selected + ' 个，已选 ' + already + ' 个' +
-                    (errors ? ' (失败 ' + errors + ')' : '') + ' (' + elapsed + 'ms)');
+                          (errors ? ' (失败 ' + errors + ')' : '') + ' (' + elapsed + 'ms)');
             } catch (e) {
                 showToast('❌ 执行出错: ' + e.message, true);
             } finally {
@@ -139,24 +149,27 @@ window.__MODULES__.tagOps = (function() {
             }
         },
 
+        // 清除页面上的所有选中（并清空内存状态）
         clearAllSelections: function() {
             if (isProcessing) { showToast('⏳ 正在执行中...'); return; }
+
             var els = document.querySelectorAll('.ant-tag-checkable, .ant-tag');
             var cleared = 0;
             els.forEach(function(el) {
                 var checked = el.classList.contains('ant-tag-checkable-checked') ||
-                    el.classList.contains('ant-tag-checked') ||
-                    el.getAttribute('aria-checked') === 'true';
+                              el.classList.contains('ant-tag-checked') ||
+                              el.getAttribute('aria-checked') === 'true';
                 if (checked && document.contains(el)) {
-                    try { el.click();
-                        cleared++; } catch (e) {}
+                    try { el.click(); cleared++; } catch (_) {}
                 }
             });
+
             for (var k in selections) selections[k].clear();
             saveSelections();
             showToast('🔄 已取消 ' + cleared + ' 个选中');
         },
 
+        // 切换模板后刷新选中状态（移除不在新模板中的标签）
         refreshSelections: function() {
             var groups = CONFIG.groups;
             groups.forEach(function(group) {
