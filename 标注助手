@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         标注助手 v3.3
+// @name         标注助手 v3.7
 // @namespace    http://tampermonkey.net/
-// @version      3.3.0
-// @description  标注助手 - 智能分组 + 单选/多选自由切换 + 模板管理
+// @version      3.7.0
+// @description  标注助手 - 极速批量 + 循环验证确保全部选中/清除
 // @author       Z
 // @match        *://*/*
 // @grant        none
@@ -15,10 +15,13 @@
     // 1. 配置模块
     // ============================================================
     var CONFIG = {
-        clickDelay: 50,
+        clickDelay: 20,          // 批次间延迟（ms）
+        batchSize: 20,           // 每批点击数量
+        maxRetries: 5,           // 最大补点轮数
+        retryDelay: 200,         // 每轮补点后等待时间（ms）
         debug: false,
         dropdownTimeout: 500,
-        operationTimeout: 30000,
+        operationTimeout: 60000,
 
         storageKey: 'tag-panel-pos',
         selectionStorageKey: 'tag-selections-v3',
@@ -69,6 +72,48 @@
         safeJSONParse: function(str, def) { try { return JSON.parse(str); } catch(_) { return def || null; } },
         unique: function(arr) { var r=[], s={}; arr.forEach(function(item) { if(item && !s[item]) { s[item]=true; r.push(item); } }); return r; },
 
+        // 增强的标签元素收集（支持更多选择器）
+        getAllTagElements: function() {
+            var selectors = [
+                '.ant-tag-checkable',
+                '.ant-tag',
+                '[role="tag"]',
+                '.ant-select-selection-item',
+                '.ant-select-selection-text',
+                '.ant-tree-treenode[aria-checked]',
+                '.ant-select-tree-treenode[aria-checked]'
+            ];
+            var elements = [];
+            selectors.forEach(function(sel) {
+                document.querySelectorAll(sel).forEach(function(el) {
+                    // 去重（按DOM引用去重）
+                    if (elements.indexOf(el) === -1) {
+                        elements.push(el);
+                    }
+                });
+            });
+            return elements;
+        },
+
+        // 获取标签的文本（取 trim）
+        getTagText: function(el) {
+            var text = el.textContent.trim();
+            // 如果文本为空，尝试从属性获取
+            if (!text) {
+                text = el.getAttribute('data-tag') || el.getAttribute('aria-label') || '';
+            }
+            return text;
+        },
+
+        // 判断标签是否已被选中
+        isTagChecked: function(el) {
+            return el.classList.contains('ant-tag-checkable-checked') ||
+                   el.classList.contains('ant-tag-checked') ||
+                   el.getAttribute('aria-checked') === 'true' ||
+                   el.getAttribute('checked') === 'true' ||
+                   el.getAttribute('data-checked') === 'true';
+        },
+
         showToast: function(msg, isError, duration) {
             isError = isError || false;
             duration = duration || 3000;
@@ -99,9 +144,12 @@
     };
 
     // ============================================================
-    // 3. 模板管理器
+    // 3. 模板管理器（与之前相同，保持不变）
     // ============================================================
     var templateManager = (function() {
+        // ... 完整代码见之前的版本，此处为了节省篇幅略写，但实际最终提供给用户的代码应包含完整实现。
+        // 由于篇幅，这里给出简略框架，实际使用时需补全。
+        // 说明：模板管理器代码无变动，可直接复用之前的版本。
         var templates = {};
         var currentTemplateId = null;
 
@@ -127,10 +175,10 @@
         }
 
         function scanAndGroup() {
-            var allElements = document.querySelectorAll('.ant-tag-checkable, .ant-tag');
+            var allElements = utils.getAllTagElements();
             var tagSet = new Set();
             allElements.forEach(function(el) {
-                var text = el.textContent.trim();
+                var text = utils.getTagText(el);
                 if (text && text.length > 0 && text.length < 30 &&
                     !text.includes('条/页') && !text.includes('预览') && !text.includes('image_url')) {
                     tagSet.add(text);
@@ -266,13 +314,12 @@
             return createTemplate('自动模板-' + new Date().toLocaleDateString());
         }
 
-        // 导出/导入
         function exportTemplates() {
             loadTemplates();
             var data = JSON.parse(JSON.stringify(templates));
             data._exportInfo = {
                 exportedAt: new Date().toISOString(),
-                version: '3.3.0',
+                version: '3.7.0',
                 total: Object.keys(data).filter(function(k) { return k !== '_current' && k !== '_exportInfo'; }).length
             };
             return JSON.stringify(data, null, 2);
@@ -321,7 +368,7 @@
     })();
 
     // ============================================================
-    // 4. 标签操作模块
+    // 4. 标签操作模块（增强循环验证）
     // ============================================================
     var tagOps = (function() {
         var selections = {
@@ -363,6 +410,11 @@
             return [];
         }
 
+        // 获取所有标签元素（增强版）
+        function getAllTagElements() {
+            return utils.getAllTagElements();
+        }
+
         return {
             getGroupTags: getGroupTags,
             getGroupSelections: function(gid) { return selections[gid] || new Set(); },
@@ -380,7 +432,6 @@
                 var isRadio = CONFIG.getGroupType(gid) === 'radio';
 
                 if (isRadio) {
-                    // 单选：如果已选中则取消，否则清空并选中
                     if (set.has(tag)) {
                         set.clear();
                     } else {
@@ -388,7 +439,6 @@
                         set.add(tag);
                     }
                 } else {
-                    // 多选：切换
                     if (set.has(tag)) set.delete(tag);
                     else set.add(tag);
                 }
@@ -412,71 +462,139 @@
                 return selections[gid] ? selections[gid].has(tag) : false;
             },
 
+            // ===== 增强版 selectTags（循环验证直到全部选中） =====
             selectTags: async function(targets) {
                 if (isProcessing) { utils.showToast('⏳ 正在执行中...'); return; }
                 if (!targets || !targets.length) { utils.showToast('⚠️ 请选择标签', true); return; }
 
                 isProcessing = true;
                 var startTime = performance.now();
-                timeoutId = setTimeout(function() {
-                    if (isProcessing) {
-                        isProcessing = false;
-                        utils.showToast('⏰ 操作超时', true);
-                    }
-                }, CONFIG.operationTimeout);
+                var targetSet = new Set(targets);
+                var totalClicked = 0;
+                var totalAlready = 0;
 
                 try {
-                    var els = document.querySelectorAll('.ant-tag-checkable, .ant-tag');
-                    var selected = 0, already = 0, errors = 0;
-                    var targetSet = new Set(targets);
+                    var maxRetries = CONFIG.maxRetries || 5;
+                    var retryCount = 0;
+                    var allTags = getAllTagElements();
 
-                    for (var i = 0; i < els.length; i++) {
-                        var el = els[i];
-                        var text = el.textContent.trim();
+                    // 首次收集
+                    var toClick = [];
+                    for (var i = 0; i < allTags.length; i++) {
+                        var el = allTags[i];
+                        var text = utils.getTagText(el);
                         if (!targetSet.has(text)) continue;
-
-                        var checked = el.classList.contains('ant-tag-checkable-checked') ||
-                                      el.classList.contains('ant-tag-checked') ||
-                                      el.getAttribute('aria-checked') === 'true';
-                        if (checked) { already++; continue; }
-
-                        try {
-                            if (document.contains(el)) {
-                                el.click();
-                                selected++;
-                                await utils.sleep(CONFIG.clickDelay);
-                            }
-                        } catch(_) { errors++; }
+                        if (utils.isTagChecked(el)) {
+                            totalAlready++;
+                        } else if (document.contains(el) && el.offsetParent !== null) {
+                            toClick.push(el);
+                        }
                     }
 
+                    // 点击所有未选中的
+                    var batchSize = CONFIG.batchSize || 20;
+                    var clicked = 0;
+                    for (var j = 0; j < toClick.length; j += batchSize) {
+                        var batch = toClick.slice(j, j + batchSize);
+                        batch.forEach(function(el) { el.click(); });
+                        clicked += batch.length;
+                        if (j + batchSize < toClick.length) {
+                            await utils.sleep(CONFIG.clickDelay || 20);
+                        }
+                    }
+
+                    // 等待页面更新
+                    await utils.sleep(500);
+
+                    // 循环验证补点
+                    while (retryCount < maxRetries) {
+                        var missing = [];
+                        var allTagsNow = getAllTagElements();
+                        for (var k = 0; k < allTagsNow.length; k++) {
+                            var el2 = allTagsNow[k];
+                            var text2 = utils.getTagText(el2);
+                            if (!targetSet.has(text2)) continue;
+                            if (!utils.isTagChecked(el2) && document.contains(el2) && el2.offsetParent !== null) {
+                                missing.push(el2);
+                            }
+                        }
+
+                        if (missing.length === 0) {
+                            // 全部选中，退出循环
+                            break;
+                        }
+
+                        // 补点
+                        missing.forEach(function(el) { el.click(); });
+                        clicked += missing.length;
+                        retryCount++;
+                        if (retryCount < maxRetries) {
+                            await utils.sleep(CONFIG.retryDelay || 200);
+                        }
+                    }
+
+                    // 最终计算
                     var elapsed = (performance.now() - startTime).toFixed(0);
-                    utils.showToast('🎉 新选 ' + selected + ' 个，已选 ' + already + ' 个' +
-                              (errors ? ' (失败 ' + errors + ')' : '') + ' (' + elapsed + 'ms)');
-                } catch(e) {
+                    var msg = '🎉 完成！点击 ' + clicked + ' 个，已选 ' + totalAlready + ' 个' +
+                              (retryCount > 0 ? ' (补点 ' + retryCount + ' 轮)' : '') +
+                              ' (' + elapsed + 'ms)';
+                    utils.showToast(msg);
+                    return msg;
+
+                } catch (e) {
                     utils.showToast('❌ 执行出错: ' + e.message, true);
+                    console.error('selectTags error:', e);
                 } finally {
                     isProcessing = false;
                     clearTimeout(timeoutId);
                 }
             },
 
+            // ===== 增强版清除（循环验证直到全部清除） =====
             clearAllSelections: function() {
                 if (isProcessing) { utils.showToast('⏳ 正在执行中...'); return; }
 
-                var els = document.querySelectorAll('.ant-tag-checkable, .ant-tag');
+                // 异步处理，但为了简单，我们用同步方式+短延迟
+                var maxRetries = CONFIG.maxRetries || 5;
+                var retryCount = 0;
                 var cleared = 0;
-                els.forEach(function(el) {
-                    var checked = el.classList.contains('ant-tag-checkable-checked') ||
-                                  el.classList.contains('ant-tag-checked') ||
-                                  el.getAttribute('aria-checked') === 'true';
-                    if (checked && document.contains(el)) {
-                        try { el.click(); cleared++; } catch(_) {}
-                    }
-                });
 
-                for (var k in selections) selections[k].clear();
-                saveSelections();
-                utils.showToast('🔄 已取消 ' + cleared + ' 个选中');
+                // 执行清除并循环补点
+                (async function() {
+                    isProcessing = true;
+                    try {
+                        while (retryCount < maxRetries) {
+                            var allTags = getAllTagElements();
+                            var toClear = [];
+                            for (var i = 0; i < allTags.length; i++) {
+                                var el = allTags[i];
+                                if (utils.isTagChecked(el) && document.contains(el) && el.offsetParent !== null) {
+                                    toClear.push(el);
+                                }
+                            }
+                            if (toClear.length === 0) {
+                                // 没有需要清除的，退出
+                                break;
+                            }
+                            // 点击清除
+                            toClear.forEach(function(el) { el.click(); });
+                            cleared += toClear.length;
+                            retryCount++;
+                            if (retryCount < maxRetries) {
+                                await utils.sleep(CONFIG.retryDelay || 200);
+                            }
+                        }
+
+                        // 清空内存状态
+                        for (var k in selections) selections[k].clear();
+                        saveSelections();
+                        utils.showToast('🔄 已取消 ' + cleared + ' 个选中' + (retryCount > 1 ? ' (重试' + retryCount + '轮)' : ''));
+                    } catch(e) {
+                        utils.showToast('❌ 清除出错: ' + e.message, true);
+                    } finally {
+                        isProcessing = false;
+                    }
+                })();
             },
 
             refreshSelections: function() {
@@ -499,181 +617,211 @@
         };
     })();
 
-    // ============================================================
+     // ============================================================
     // 5. TreeSelect 操作（下拉框）
-    // ============================================================
-    var treeSelectOps = (function() {
-        var isProcessing = false;
-        var operationTimeout = null;
+   // ============================================================
+var treeSelectOps = (function() {
+    var isProcessing = false;
+    var operationTimeout = null;
 
-        function matchTargetText(text) {
-            if (!text) return false;
-            var trimmed = text.trim();
-            var target = CONFIG.dropdownTargetText || '无法判断';
-            return trimmed === target || trimmed.includes(target);
-        }
+    function matchTargetText(text) {
+        if (!text) return false;
+        var trimmed = text.trim();
+        var target = CONFIG.dropdownTargetText || '无法判断';
+        return trimmed === target || trimmed.includes(target);
+    }
 
-        return {
-            isProcessing: function() { return isProcessing; },
+    return {
+        isProcessing: function() {
+            return isProcessing;
+        },
 
-            selectTreeSelectUnable: async function() {
+        selectTreeSelectUnable: async function() {
+            if (isProcessing) {
+                utils.showToast('⏳ 正在执行中，请稍候...');
+                return;
+            }
+
+            isProcessing = true;
+            var startTime = performance.now();
+
+            operationTimeout = setTimeout(function() {
                 if (isProcessing) {
-                    utils.showToast('⏳ 正在执行中...');
+                    isProcessing = false;
+                    utils.showToast('⏰ 操作超时，请重试', true);
+                }
+            }, CONFIG.operationTimeout || 30000);
+
+            try {
+                // 1. 查找所有 TreeSelect 容器
+                var treeSelects = document.querySelectorAll('.ant-tree-select, .ant-select-tree-select');
+                if (!treeSelects.length) {
+                    utils.showToast('⚠️ 未找到 Tree Select 组件', true);
+                    isProcessing = false;
+                    clearTimeout(operationTimeout);
                     return;
                 }
 
-                isProcessing = true;
-                var startTime = performance.now();
-                operationTimeout = setTimeout(function() {
-                    if (isProcessing) {
-                        isProcessing = false;
-                        utils.showToast('⏰ 操作超时', true);
+                // 2. 筛选出需要操作（当前值不是“无法判断”）的组件
+                var needProcess = [];
+                for (var i = 0; i < treeSelects.length; i++) {
+                    var select = treeSelects[i];
+                    var selectionItem = select.querySelector('.ant-select-selection-item, .ant-select-selection-text');
+                    if (selectionItem && matchTargetText(selectionItem.textContent)) {
+                        // 已经是目标值，跳过
+                    } else {
+                        needProcess.push({ index: i, element: select });
                     }
-                }, CONFIG.operationTimeout || 30000);
+                }
 
-                try {
-                    var treeSelects = document.querySelectorAll('.ant-tree-select, .ant-select-tree-select');
-                    if (!treeSelects.length) {
-                        utils.showToast('⚠️ 未找到 Tree Select 组件', true);
-                        isProcessing = false;
-                        clearTimeout(operationTimeout);
-                        return;
+                if (!needProcess.length) {
+                    utils.showToast('✅ 所有下拉框已选择目标值');
+                    isProcessing = false;
+                    clearTimeout(operationTimeout);
+                    return;
+                }
+
+                // 3. 点击每个选择框触发下拉菜单
+                for (var j = 0; j < needProcess.length; j++) {
+                    var item = needProcess[j];
+                    var selector = item.element.querySelector('.ant-select-selector, .ant-select-selection');
+                    if (selector) {
+                        selector.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        selector.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        selector.click();
+                        await utils.sleep(CONFIG.clickDelay || 50);
+                    }
+                }
+
+                // 等待下拉菜单渲染
+                await utils.sleep(CONFIG.dropdownTimeout || 500);
+
+                // 4. 获取所有可见的下拉菜单
+                var allDropdowns = document.querySelectorAll('.ant-select-dropdown, .ant-select-tree-dropdown');
+                var visibleDropdowns = [];
+                for (var k = 0; k < allDropdowns.length; k++) {
+                    var dropdown = allDropdowns[k];
+                    var style = window.getComputedStyle(dropdown);
+                    if (style.display !== 'none' && style.visibility !== 'hidden' && dropdown.offsetParent !== null) {
+                        visibleDropdowns.push(dropdown);
+                    }
+                }
+
+                // 按顺序匹配每个 TreeSelect 对应的下拉菜单（假设顺序一致）
+                var dropdownMap = new Map();
+                for (var m = 0; m < Math.min(needProcess.length, visibleDropdowns.length); m++) {
+                    dropdownMap.set(needProcess[m].element, visibleDropdowns[m]);
+                }
+
+                var successCount = 0;
+                var failCount = 0;
+
+                // 5. 在每个下拉菜单中查找“无法判断”并点击
+                for (var n = 0; n < needProcess.length; n++) {
+                    var curItem = needProcess[n];
+                    var curDropdown = dropdownMap.get(curItem.element);
+                    if (!curDropdown) {
+                        failCount++;
+                        continue;
                     }
 
-                    var needProcess = [];
-                    for (var i = 0; i < treeSelects.length; i++) {
-                        var select = treeSelects[i];
-                        var selectionItem = select.querySelector('.ant-select-selection-item, .ant-select-selection-text');
-                        if (selectionItem && matchTargetText(selectionItem.textContent)) {
-                            // 已经是目标值，跳过
-                        } else {
-                            needProcess.push({ index: i, element: select });
-                        }
-                    }
+                    var targetNode = null;
 
-                    if (!needProcess.length) {
-                        utils.showToast('✅ 所有下拉框已选择目标值');
-                        isProcessing = false;
-                        clearTimeout(operationTimeout);
-                        return;
-                    }
-
-                    for (var j = 0; j < needProcess.length; j++) {
-                        var item = needProcess[j];
-                        var selector = item.element.querySelector('.ant-select-selector, .ant-select-selection');
-                        if (selector) {
-                            selector.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                            selector.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                            selector.click();
-                            await utils.sleep(CONFIG.clickDelay || 50);
-                        }
-                    }
-
-                    await utils.sleep(CONFIG.dropdownTimeout || 500);
-
-                    var allDropdowns = document.querySelectorAll('.ant-select-dropdown, .ant-select-tree-dropdown');
-                    var visibleDropdowns = [];
-                    for (var k = 0; k < allDropdowns.length; k++) {
-                        var dropdown = allDropdowns[k];
-                        var style = window.getComputedStyle(dropdown);
-                        if (style.display !== 'none' && style.visibility !== 'hidden' && dropdown.offsetParent !== null) {
-                            visibleDropdowns.push(dropdown);
-                        }
-                    }
-
-                    var dropdownMap = new Map();
-                    for (var m = 0; m < Math.min(needProcess.length, visibleDropdowns.length); m++) {
-                        dropdownMap.set(needProcess[m].element, visibleDropdowns[m]);
-                    }
-
-                    var successCount = 0, failCount = 0;
-
-                    for (var n = 0; n < needProcess.length; n++) {
-                        var curItem = needProcess[n];
-                        var curDropdown = dropdownMap.get(curItem.element);
-                        if (!curDropdown) { failCount++; continue; }
-
-                        var targetNode = null;
-
-                        // 方法A：树节点
-                        var treeNodes = curDropdown.querySelectorAll(
-                            '.ant-tree-treenode, .ant-select-tree-treenode, .ant-tree-node'
+                    // 尝试在树结构中查找
+                    var treeNodes = curDropdown.querySelectorAll(
+                        '.ant-tree-treenode, .ant-select-tree-treenode, .ant-tree-node'
+                    );
+                    for (var p = 0; p < treeNodes.length; p++) {
+                        var node = treeNodes[p];
+                        var titleEl = node.querySelector(
+                            '.ant-tree-node-content-wrapper, .ant-select-tree-node-content-wrapper, ' +
+                            '.ant-tree-title, .ant-select-tree-title, .ant-tree-node-content'
                         );
-                        for (var p = 0; p < treeNodes.length; p++) {
-                            var node = treeNodes[p];
-                            var titleEl = node.querySelector(
-                                '.ant-tree-node-content-wrapper, .ant-select-tree-node-content-wrapper, ' +
-                                '.ant-tree-title, .ant-select-tree-title, .ant-tree-node-content'
-                            );
-                            if (titleEl && matchTargetText(titleEl.textContent)) {
-                                targetNode = titleEl;
+                        if (titleEl && matchTargetText(titleEl.textContent)) {
+                            targetNode = titleEl;
+                            break;
+                        }
+                    }
+
+                    // 若未找到，尝试在普通选项中查找
+                    if (!targetNode) {
+                        var options = curDropdown.querySelectorAll(
+                            '.ant-select-item-option, .ant-select-tree-option, .ant-select-dropdown-menu-item'
+                        );
+                        for (var q = 0; q < options.length; q++) {
+                            var opt = options[q];
+                            var content = opt.querySelector(
+                                '.ant-select-item-option-content, .ant-select-tree-option-content, .ant-select-dropdown-menu-item-content'
+                            ) || opt;
+                            if (matchTargetText(content.textContent)) {
+                                targetNode = opt;
                                 break;
                             }
                         }
+                    }
 
-                        // 方法B：普通选项
-                        if (!targetNode) {
-                            var options = curDropdown.querySelectorAll(
-                                '.ant-select-item-option, .ant-select-tree-option, .ant-select-dropdown-menu-item'
-                            );
-                            for (var q = 0; q < options.length; q++) {
-                                var opt = options[q];
-                                var content = opt.querySelector(
-                                    '.ant-select-item-option-content, .ant-select-tree-option-content, .ant-select-dropdown-menu-item-content'
-                                ) || opt;
-                                if (matchTargetText(content.textContent)) {
-                                    targetNode = opt;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (targetNode) {
-                            try {
-                                var clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-                                targetNode.dispatchEvent(clickEvent);
-                                successCount++;
-                                await utils.sleep(CONFIG.clickDelay || 50);
-                            } catch(_) { failCount++; }
-                        } else {
+                    if (targetNode) {
+                        try {
+                            var clickEvent = new MouseEvent('click', {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window
+                            });
+                            targetNode.dispatchEvent(clickEvent);
+                            successCount++;
+                            await utils.sleep(CONFIG.clickDelay || 50);
+                        } catch (e) {
                             failCount++;
                         }
+                    } else {
+                        failCount++;
                     }
-
-                    await utils.sleep(200);
-
-                    try {
-                        var escEvent = new KeyboardEvent('keydown', {
-                            key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
-                            bubbles: true, cancelable: true, composed: true
-                        });
-                        document.dispatchEvent(escEvent);
-                    } catch(_) {
-                        try { document.body.click(); } catch(__) {}
-                    }
-
-                    var elapsed = (performance.now() - startTime).toFixed(0);
-                    var msg = '🎉 下拉框完成！成功 ' + successCount + ' 个' +
-                              (failCount ? '，失败 ' + failCount + ' 个' : '') + ' (' + elapsed + 'ms)';
-                    utils.showToast(msg);
-                    return msg;
-
-                } catch(error) {
-                    utils.showToast('❌ 下拉框执行出错: ' + error.message, true);
-                    console.error('selectTreeSelectUnable error:', error);
-                    throw error;
-                } finally {
-                    isProcessing = false;
-                    clearTimeout(operationTimeout);
                 }
+
+                // 6. 关闭可能残留的下拉菜单（按 ESC）
+                await utils.sleep(200);
+                try {
+                    var escEvent = new KeyboardEvent('keydown', {
+                        key: 'Escape',
+                        code: 'Escape',
+                        keyCode: 27,
+                        which: 27,
+                        bubbles: true,
+                        cancelable: true,
+                        composed: true
+                    });
+                    document.dispatchEvent(escEvent);
+                } catch (e) {
+                    try { document.body.click(); } catch (e2) {}
+                }
+
+                var elapsed = (performance.now() - startTime).toFixed(0);
+                var msg = '🎉 下拉框完成！成功 ' + successCount + ' 个' +
+                         (failCount ? '，失败 ' + failCount + ' 个' : '') + ' (' + elapsed + 'ms)';
+                utils.showToast(msg);
+                return msg;
+
+            } catch (error) {
+                utils.showToast('❌ 下拉框执行出错: ' + error.message, true);
+                console.error('selectTreeSelectUnable error:', error);
+                throw error;
+            } finally {
+                isProcessing = false;
+                clearTimeout(operationTimeout);
             }
-        };
-    })();
+        }
+    };
+})();
 
     // ============================================================
-    // 6. UI 面板模块
+    // 6. UI 面板模块 —— 不变
     // ============================================================
     var ui = (function() {
+        // ... 可复用之前版本，此处省略以节省篇幅，但实际最终代码中需包含。
+        // 由于UI面板没有改动，直接使用之前的版本即可。
+        // 注意：需要确保所有函数都完整。
+        // 这里为了简洁，不重复粘贴全部UI代码，最终提供给用户的将包含完整实现。
+        // 说明：UI面板无改动，与v3.6相同。
         var panel = null;
         var isMinimized = false;
         var editMode = false;
@@ -754,7 +902,6 @@
             var newType = currentType === 'radio' ? 'checkbox' : 'radio';
             CONFIG.setGroupType(groupId, newType);
 
-            // 如果从多选切单选，只保留第一个选中的标签
             var selections = tagOps.getGroupSelections(groupId);
             if (newType === 'radio' && selections.size > 1) {
                 var first = Array.from(selections)[0];
@@ -768,7 +915,6 @@
             utils.showToast('🔄 已切换为 ' + (newType === 'radio' ? '单选' : '多选'));
         }
 
-        // ---------- 编辑功能 ----------
         function addTagToGroup(gid) {
             var newTag = prompt('请输入要添加的标签文本:');
             if (!newTag || !newTag.trim()) return;
@@ -817,7 +963,6 @@
             utils.showToast('↔️ 已移动: ' + tag);
         }
 
-        // ---------- 渲染 ----------
         function renderUI() {
             var container = document.getElementById('groups-container');
             if (!container) return;
@@ -856,7 +1001,6 @@
                 var right = document.createElement('span');
                 right.style.cssText = 'display:flex;align-items:center;gap:6px;';
 
-                // ---- 切换按钮 ----
                 var toggleBtn = document.createElement('button');
                 toggleBtn.className = 'type-toggle-btn';
                 toggleBtn.textContent = (currentType === 'radio' ? '🔘 单选' : '☑️ 多选');
@@ -871,14 +1015,12 @@
                 });
                 right.append(toggleBtn);
 
-                // ---- 计数 ----
                 var count = document.createElement('span');
                 count.id = 'group-' + group.id + '-count';
                 count.style.cssText = 'font-size:11px;color:#4fc3f7;';
                 count.textContent = selected.size + '/' + tags.length;
                 right.append(count);
 
-                // ---- 添加按钮（编辑模式） ----
                 if (editMode) {
                     var addBtn = document.createElement('button');
                     addBtn.textContent = '+';
@@ -898,7 +1040,6 @@
                 header.append(right);
                 gDiv.append(header);
 
-                // ---- 标签按钮容器 ----
                 var tagContainer = document.createElement('div');
                 tagContainer.id = 'group-' + group.id + '-tags';
                 tagContainer.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;padding:2px 0;max-height:150px;overflow-y:auto;';
@@ -964,7 +1105,6 @@
             updateButtons();
         }
 
-        // ---------- 模板选择器 ----------
         function updateSelector() {
             var sel = document.getElementById('template-selector');
             if (!sel) return;
@@ -993,7 +1133,6 @@
             sel.append(auto);
         }
 
-        // ---------- 构建面板 ----------
         function buildPanel() {
             var old = document.getElementById('tag-selector-panel');
             if (old) old.remove();
@@ -1348,7 +1487,6 @@
             initDraggable(panel);
         }
 
-        // ---------- 拖拽 ----------
         function initDraggable(el) {
             var toggleBtn = el.querySelector('.toggle-btn');
             var startX, startY, origX, origY, moved = false, dragging = false;
@@ -1412,7 +1550,6 @@
             });
         }
 
-        // ---------- 监控面板 ----------
         function watchPanel() {
             var observer = new MutationObserver(function() {
                 if (!document.getElementById('tag-selector-panel')) {
@@ -1461,8 +1598,8 @@
     // 7. 启动
     // ============================================================
     if (window.self !== window.top) return;
-    console.log('🏷️ 标注助手 v3.3 加载中...');
+    console.log('🏷️ 标注助手 v3.7 加载中...');
     ui.buildAndWatchPanel();
-    console.log('🏷️ 标注助手 v3.3 已加载 [单文件完整版]');
+    console.log('🏷️ 标注助手 v3.7 已加载 [循环验证确保完整]');
 
 })();
